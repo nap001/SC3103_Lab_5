@@ -24,141 +24,142 @@
  *   sudo ./gpio_a2
  */
 
+#include <errno.h>
+#include <fcntl.h>
+#include <inttypes.h>
+#include <linux/gpio.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
 #include <sys/ioctl.h>
-#include <linux/gpio.h>
-#include <inttypes.h>
+#include <unistd.h>
 
-#define GPIO_CHIP_DEV    "/dev/gpiochip0"
-#define PIN_LED_RED      27
-#define PIN_PUSH_BUTTON  11
-#define NUM_PRESSES      5    /* number of button presses before exit */
-#define DEBOUNCE_NS      300000000ULL  /* 300 ms minimum gap between valid presses */
-#define BLINK_COUNT      3    /* Red LED blinks per press             */
-#define BLINK_DELAY_US   150000  /* 150 ms per half-blink             */
+#define GPIO_CHIP_DEV "/dev/gpiochip0"
+#define PIN_LED_RED 27
+#define PIN_PUSH_BUTTON 11
+#define NUM_PRESSES 5            /* number of button presses before exit */
+#define DEBOUNCE_NS 300000000ULL /* 300 ms minimum gap between valid presses   \
+                                  */
+#define BLINK_COUNT 1            /* Red LED blinks per press             */
+#define BLINK_DELAY_US 150000    /* 150 ms per half-blink             */
 
 /* ---- Helper: blink the Red LED ---- */
-static void blink_red(int red_fd, int count, useconds_t delay_us)
-{
-    struct gpiohandle_data d;
-    memset(&d, 0, sizeof(d));
+static void blink_red(int red_fd, int count, useconds_t delay_us) {
+  struct gpiohandle_data d;
+  memset(&d, 0, sizeof(d));
 
-    for (int i = 0; i < count; ++i) {
-        d.values[0] = 1;
-        ioctl(red_fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &d);
-        usleep(delay_us);
+  for (int i = 0; i < count; ++i) {
+    d.values[0] = 1;
+    ioctl(red_fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &d);
+    usleep(delay_us);
 
-        d.values[0] = 0;
-        ioctl(red_fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &d);
-        usleep(delay_us);
-    }
+    d.values[0] = 0;
+    ioctl(red_fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &d);
+    usleep(delay_us);
+  }
 }
 
-int main(int argc, char *argv[])
-{
-    int fd0, ret;
-    struct gpiochip_info      cinfo;
-    struct gpiohandle_request req_red;
-    struct gpioevent_request  req_pb;
-    struct gpioevent_data     event;
+int main(int argc, char *argv[]) {
+  int fd0, ret;
+  struct gpiochip_info cinfo;
+  struct gpiohandle_request req_red;
+  struct gpioevent_request req_pb;
+  struct gpioevent_data event;
 
-    printf("=== SC3103 Exercise A2: Push Button -> Red LED Blink ===\n");
+  printf("=== SC3103 Exercise A2: Push Button -> Red LED Blink ===\n");
 
-    /* ---- Step 1: Open GPIO chip ---- */
-    fd0 = open(GPIO_CHIP_DEV, O_RDWR);
-    if (fd0 < 0) {
-        perror("Failed to open " GPIO_CHIP_DEV " (run with sudo)");
-        return EXIT_FAILURE;
-    }
+  /* ---- Step 1: Open GPIO chip ---- */
+  fd0 = open(GPIO_CHIP_DEV, O_RDWR);
+  if (fd0 < 0) {
+    perror("Failed to open " GPIO_CHIP_DEV " (run with sudo)");
+    return EXIT_FAILURE;
+  }
 
-    /* ---- Step 2: Query chip info ---- */
-    memset(&cinfo, 0, sizeof(cinfo));
-    if (ioctl(fd0, GPIO_GET_CHIPINFO_IOCTL, &cinfo) < 0) {
-        perror("GPIO_GET_CHIPINFO_IOCTL failed");
-        close(fd0);
-        return EXIT_FAILURE;
-    }
-    printf("GPIO chip: %s, \"%s\", %u lines\n\n",
-           cinfo.name, cinfo.label, cinfo.lines);
+  /* ---- Step 2: Query chip info ---- */
+  memset(&cinfo, 0, sizeof(cinfo));
+  if (ioctl(fd0, GPIO_GET_CHIPINFO_IOCTL, &cinfo) < 0) {
+    perror("GPIO_GET_CHIPINFO_IOCTL failed");
+    close(fd0);
+    return EXIT_FAILURE;
+  }
+  printf("GPIO chip: %s, \"%s\", %u lines\n\n", cinfo.name, cinfo.label,
+         cinfo.lines);
 
-    /* ---- Step 3: Claim Red LED (GPIO27) as output ---- */
-    memset(&req_red, 0, sizeof(req_red));
-    req_red.lines           = 1;
-    req_red.lineoffsets[0]  = PIN_LED_RED;
-    req_red.flags           = GPIOHANDLE_REQUEST_OUTPUT;
-    strncpy(req_red.consumer_label, "ExA2_Red_LED",
-            sizeof(req_red.consumer_label) - 1);
+  /* ---- Step 3: Claim Red LED (GPIO27) as output ---- */
+  memset(&req_red, 0, sizeof(req_red));
+  req_red.lines = 1;
+  req_red.lineoffsets[0] = PIN_LED_RED;
+  req_red.flags = GPIOHANDLE_REQUEST_OUTPUT;
+  strncpy(req_red.consumer_label, "ExA2_Red_LED",
+          sizeof(req_red.consumer_label) - 1);
 
-    ret = ioctl(fd0, GPIO_GET_LINEHANDLE_IOCTL, &req_red);
-    if (ret < 0) {
-        perror("Failed to get Red LED line handle");
-        close(fd0);
-        return EXIT_FAILURE;
-    }
+  ret = ioctl(fd0, GPIO_GET_LINEHANDLE_IOCTL, &req_red);
+  if (ret < 0) {
+    perror("Failed to get Red LED line handle");
+    close(fd0);
+    return EXIT_FAILURE;
+  }
 
-    /* ---- Step 4: Register Push Button (GPIO11) rising-edge event ----
-     * W10L4 Slide 19: GPIOEVENT_REQUEST_RISING_EDGE
-     * Button is Active-High -> press generates LOW->HIGH (rising) edge. */
-    memset(&req_pb, 0, sizeof(req_pb));
-    req_pb.lineoffset   = PIN_PUSH_BUTTON;
-    req_pb.handleflags  = GPIOHANDLE_REQUEST_INPUT;
-    req_pb.eventflags   = GPIOEVENT_REQUEST_RISING_EDGE;
-    strncpy(req_pb.consumer_label, "ExA2_PushButton",
-            sizeof(req_pb.consumer_label) - 1);
+  /* ---- Step 4: Register Push Button (GPIO11) rising-edge event ----
+   * W10L4 Slide 19: GPIOEVENT_REQUEST_RISING_EDGE
+   * Button is Active-High -> press generates LOW->HIGH (rising) edge. */
+  memset(&req_pb, 0, sizeof(req_pb));
+  req_pb.lineoffset = PIN_PUSH_BUTTON;
+  req_pb.handleflags = GPIOHANDLE_REQUEST_INPUT;
+  req_pb.eventflags = GPIOEVENT_REQUEST_RISING_EDGE;
+  strncpy(req_pb.consumer_label, "ExA2_PushButton",
+          sizeof(req_pb.consumer_label) - 1);
 
-    ret = ioctl(fd0, GPIO_GET_LINEEVENT_IOCTL, &req_pb);
-    if (ret < 0) {
-        perror("Failed to register Push Button event");
-        close(req_red.fd);
-        close(fd0);
-        return EXIT_FAILURE;
-    }
-
-    printf("Waiting for %d button press(es) on GPIO%d (Pibrella red button)...\n\n",
-           NUM_PRESSES, PIN_PUSH_BUTTON);
-
-    /* ---- Step 5: Event loop - blocking read, no polling ----
-     * Software debounce via timestamp: physical contacts bounce for ~10-30 ms,
-     * generating multiple rapid rising-edge events queued in the kernel buffer.
-     * We accept a press only if at least DEBOUNCE_NS (300 ms) has elapsed
-     * since the last accepted press. event.timestamp is in nanoseconds. */
-    uint64_t last_accepted_ts = 0;
-    int press = 1;
-    while (press <= NUM_PRESSES) {
-        ssize_t n = read(req_pb.fd, &event, sizeof(event));
-        if (n == (ssize_t)sizeof(event)) {
-            /* Discard bounce: event arrived too soon after last valid press */
-            if (last_accepted_ts != 0 &&
-                (event.timestamp - last_accepted_ts) < DEBOUNCE_NS) {
-                printf("  [Bounce filtered: delta %" PRIu64 " ms < 300 ms, ignored]\n",
-                       (event.timestamp - last_accepted_ts) / 1000000ULL);
-                continue;  /* go back to read(), wait for next event */
-            }
-            last_accepted_ts = event.timestamp;
-
-            printf("[Press %d/%d] Button detected! Timestamp: %" PRIu64 " ns\n",
-                   press, NUM_PRESSES, event.timestamp);
-            printf("  -> Blinking Red LED (GPIO%d) %d times...\n",
-                   PIN_LED_RED, BLINK_COUNT);
-            blink_red(req_red.fd, BLINK_COUNT, BLINK_DELAY_US);
-            ++press;
-        } else if (n < 0) {
-            if (errno == EINTR) continue;  /* signal interrupt, retry */
-            perror("Error reading button event");
-            break;
-        }
-    }
-
-    /* ---- Step 6: Cleanup ---- */
-    close(req_pb.fd);
+  ret = ioctl(fd0, GPIO_GET_LINEEVENT_IOCTL, &req_pb);
+  if (ret < 0) {
+    perror("Failed to register Push Button event");
     close(req_red.fd);
     close(fd0);
+    return EXIT_FAILURE;
+  }
 
-    printf("\nExercise A2 complete. Red LED is now OFF.\n");
-    return EXIT_SUCCESS;
+  printf(
+      "Waiting for %d button press(es) on GPIO%d (Pibrella red button)...\n\n",
+      NUM_PRESSES, PIN_PUSH_BUTTON);
+
+  /* ---- Step 5: Event loop - blocking read, no polling ----
+   * Software debounce via timestamp: physical contacts bounce for ~10-30 ms,
+   * generating multiple rapid rising-edge events queued in the kernel buffer.
+   * We accept a press only if at least DEBOUNCE_NS (300 ms) has elapsed
+   * since the last accepted press. event.timestamp is in nanoseconds. */
+  uint64_t last_accepted_ts = 0;
+  int press = 1;
+  while (press <= NUM_PRESSES) {
+    ssize_t n = read(req_pb.fd, &event, sizeof(event));
+    if (n == (ssize_t)sizeof(event)) {
+      /* Discard bounce: event arrived too soon after last valid press */
+      if (last_accepted_ts != 0 &&
+          (event.timestamp - last_accepted_ts) < DEBOUNCE_NS) {
+        printf("  [Bounce filtered: delta %" PRIu64 " ms < 300 ms, ignored]\n",
+               (event.timestamp - last_accepted_ts) / 1000000ULL);
+        continue; /* go back to read(), wait for next event */
+      }
+      last_accepted_ts = event.timestamp;
+
+      printf("[Press %d/%d] Button detected! Timestamp: %" PRIu64 " ns\n",
+             press, NUM_PRESSES, event.timestamp);
+      printf("  -> Blinking Red LED (GPIO%d) %d times...\n", PIN_LED_RED,
+             BLINK_COUNT);
+      blink_red(req_red.fd, BLINK_COUNT, BLINK_DELAY_US);
+      ++press;
+    } else if (n < 0) {
+      if (errno == EINTR)
+        continue; /* signal interrupt, retry */
+      perror("Error reading button event");
+      break;
+    }
+  }
+
+  /* ---- Step 6: Cleanup ---- */
+  close(req_pb.fd);
+  close(req_red.fd);
+  close(fd0);
+
+  printf("\nExercise A2 complete. Red LED is now OFF.\n");
+  return EXIT_SUCCESS;
 }
