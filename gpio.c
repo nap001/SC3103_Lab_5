@@ -14,7 +14,7 @@
  *   - Green LED:   GPIO4
  *   - Yellow LED:  GPIO17
  *   - Red LED:     GPIO27
- *   - Push Button: GPIO11 (Active-Low circuit with 1k pull-up to 3.3V)
+ *   - Push Button: GPIO11 (Active-High circuit: 3V3 -> 1K -> Button -> GPIO11)
  *
  * Compilation on Raspberry Pi:
  *   gcc -Wall -O2 -o gpio gpio.c
@@ -156,15 +156,17 @@ int monitor_button_and_blink_red(int chip_fd)
     }
 
     // 2. Setup Push Button (GPIO11) event request
-    // On Pibrella, pressing the button connects GPIO11 to GND (Active-Low).
-    // A press produces a FALLING edge; a release produces a RISING edge.
-    // We listen for FALLING_EDGE (press), or BOTH_EDGES.
-    // In accordance with lecture slides (Slide 19), GPIOEVENT_REQUEST_FALLING_EDGE
-    // or GPIOEVENT_REQUEST_RISING_EDGE can be used. We use FALLING_EDGE for true press detection.
+    // On Pibrella, the push button is wired as Active-High:
+    // 3V3 -> 1K Resistor -> Push Button -> GPIO11.
+    // - Unpressed: Switch is open -> GPIO11 is pulled LOW (0) via internal pulldown.
+    // - Pressed: Switch closes -> connects 3V3 to GPIO11 (reads HIGH / 1).
+    // Hence, pressing the button produces a LOW-to-HIGH transition (RISING EDGE),
+    // precisely as configured in W10L4 Slide 19 (GPIOEVENT_REQUEST_RISING_EDGE)
+    // and Slide 82 ("on rising edge (press, not release)").
     memset(&req_pb, 0, sizeof(req_pb));
     req_pb.lineoffset = PIN_PUSH_BUTTON;
     req_pb.handleflags = GPIOHANDLE_REQUEST_INPUT;
-    req_pb.eventflags = GPIOEVENT_REQUEST_FALLING_EDGE;
+    req_pb.eventflags = GPIOEVENT_REQUEST_RISING_EDGE;
     strncpy(req_pb.consumer_label, "Push Button Event", sizeof(req_pb.consumer_label) - 1);
 
     ret = ioctl(chip_fd, GPIO_GET_LINEEVENT_IOCTL, &req_pb);

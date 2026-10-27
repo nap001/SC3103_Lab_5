@@ -14,7 +14,7 @@ From the lab manual circuit schematic (Page 3) and lecture notes (W10L4):
 - **Green LED**: RPi `GPIO4` (Header Pin 7) - Output
 - **Yellow LED**: RPi `GPIO17` (Header Pin 11) - Output
 - **Red LED**: RPi `GPIO27` (Header Pin 13) - Output
-- **Push Button**: RPi `GPIO11` (Header Pin 23) - Input with 1k pull-up resistor to 3.3V (Active-Low)
+- **Push Button**: RPi `GPIO11` (Header Pin 23) - Input (Active-High: 3V3 -> 1K -> Push Button -> GPIO11)
 - **Piezo Buzzer**: RPi `GPIO18` (Header Pin 12) - Output
 
 ---
@@ -38,13 +38,19 @@ In modern Linux (v4.8+), the legacy sysfs integer interface (`/sys/class/gpio/`)
 3. **Missing cleanup**: When exiting, turning off LEDs before releasing file descriptors prevents floating hardware states.
 
 ### 2.2 Push Button Circuit & Edge Detection (Exercise 3.2):
-The Pibrella push button circuit connects `3V3 -> 1K Resistor -> GPIO11 -> Push Button -> GND`:
-- **Unpressed**: Node is pulled **HIGH (1)** by the 1k resistor.
-- **Pressed**: Node is shorted to **GND (LOW / 0)**.
-- **Transition on press**: High-to-Low transition (**FALLING EDGE**).
-- **Transition on release**: Low-to-High transition (**RISING EDGE**).
+The Pibrella push button circuit connects:
+`3V3 -> 1K Resistor -> Push Button Switch -> GPIO11`
+- **Unpressed (Idle)**: The switch is open. The Raspberry Pi's internal pull-down resistor pulls `GPIO11` to ground, so it reads **LOW (`0`)**.
+- **Pressed**: The switch closes, directly connecting `3V3` (via the 1K protection resistor) to `GPIO11`, so it reads **HIGH (`1`)**.
+- **Therefore, the button is Active-HIGH**:
+  - **Press event**: LOW $\rightarrow$ HIGH transition (**RISING EDGE**).
+  - **Release event**: HIGH $\rightarrow$ LOW transition (**FALLING EDGE**).
 
-In accordance with Lecture W10L4 Slide 19, event monitoring is handled asynchronously and efficiently via `GPIOEVENT_REQUEST_FALLING_EDGE` (or `GPIOEVENT_REQUEST_RISING_EDGE`), blocking with `read()` without wasting CPU cycles in busy-wait loops.
+This explains why **Lecture W10L4** and the lab manual explicitly configure:
+- Slide 19: `req_pb.eventflags = GPIOEVENT_REQUEST_RISING_EDGE;`
+- Slide 82 & Lab Manual Appendix C: `IRQF_TRIGGER_RISING, // on rising edge (press, not release)`
+
+In accordance with Lecture W10L4 Slide 19, event monitoring is handled asynchronously and efficiently via `GPIOEVENT_REQUEST_RISING_EDGE`, blocking with `read()` without wasting CPU cycles in busy-wait polling loops.
 
 ### 2.3 User-Space Program Compilation & Execution
 On the Raspberry Pi terminal:
