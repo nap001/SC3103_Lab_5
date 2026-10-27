@@ -14,9 +14,9 @@ all: modules user
 modules:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
-user: gpio.c
-	gcc -Wall -O2 -o gpio gpio.c
+user: ../ExA_UserSpace/gpio.c
+	gcc -Wall -O2 -o ../ExA_UserSpace/gpio ../ExA_UserSpace/gpio.c
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
-	rm -f gpio
+	rm -f ../ExA_UserSpace/gpio
