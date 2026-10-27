@@ -1,168 +1,221 @@
 /**
- * gpio_a2.c - SC3103 Practical Exercise #5 (Exercise A2)
+ * gpio_a2.c - SC3103 Practical Exercise #5 (Exercise A: Simultaneous A1 & A2)
  *
- * Demonstration:
- *   Monitor the Push Button (GPIO11). Each time it is pressed, the Red LED (GPIO27)
- *   toggles state:
- *     - OFF -> ON (and remains ON)
- *     - ON -> OFF (and remains OFF)
- *   Waits for 5 button presses then exits.
+ * Requirements:
+ *   - A1 and A2 are ongoing at the same time.
+ *   - Only the Green LED (GPIO4) blinks for 5 seconds (~0.5s per blink: 250ms ON / 250ms OFF).
+ *   - Push Button (GPIO11) uses polling (GPIOHANDLE_GET_LINE_VALUES_IOCTL) to detect press.
+ *   - Each button press toggles the Red LED (GPIO27):
+ *       OFF -> ON (and remains ON)
+ *       ON -> OFF (and remains OFF)
  *
  * Pibrella Pin Connections:
- *   - Red LED:    GPIO27 (Header Pin 13) - Output (initially OFF)
- *   - Push Button:GPIO11 (Header Pin 23) - Input, Active-High
- *                 Circuit: 3V3 -> 1K -> Button -> GPIO11
- *                 Press = LOW->HIGH = Rising Edge
- *
- * Key API (W10L4 Slide 19):
- *   - gpioevent_request with GPIOEVENT_REQUEST_RISING_EDGE
- *   - GPIO_GET_LINEEVENT_IOCTL
- *   - Blocking read() on event fd (no polling)
- *   - Software timestamp debounce to ignore mechanical contact bounce (< 300 ms)
+ *   - Green LED:   GPIO4  (Pin 7)  - Output (blinks for 5s)
+ *   - Red LED:     GPIO27 (Pin 13) - Output (toggles on button press, starts OFF)
+ *   - Push Button: GPIO11 (Pin 23) - Input, Active-High (polled at 100 Hz)
  *
  * Compilation on Raspberry Pi:
  *   gcc -Wall -O2 -o gpio_a2 gpio_a2.c
  *
- * Execution (requires root to open /dev/gpiochip0):
+ * Execution:
  *   sudo ./gpio_a2
  */
 
-#include <errno.h>
-#include <fcntl.h>
-#include <inttypes.h>
-#include <linux/gpio.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/ioctl.h>
+#include <linux/gpio.h>
+#include <inttypes.h>
+#include <time.h>
 
 #define GPIO_CHIP_DEV "/dev/gpiochip0"
-#define PIN_LED_RED 27
-#define PIN_PUSH_BUTTON 11
-#define NUM_PRESSES 5            /* number of button presses before exit */
-#define DEBOUNCE_NS 300000000ULL /* 300 ms minimum gap between valid presses */
 
-/* ---- Helper: set the Red LED state (0 = OFF, 1 = ON) ---- */
-static int set_red_led(int red_fd, int state) {
-  struct gpiohandle_data d;
-  memset(&d, 0, sizeof(d));
-  d.values[0] = state ? 1 : 0;
-  return ioctl(red_fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &d);
+#define PIN_LED_GREEN    4
+#define PIN_LED_RED      27
+#define PIN_PUSH_BUTTON  11
+
+#define TOTAL_DURATION_SEC    5.0    /* 5 seconds total run time */
+#define BLINK_HALF_PERIOD_MS  250    /* 250ms ON + 250ms OFF = 0.5s per blink cycle */
+#define POLL_INTERVAL_US      10000  /* 10 ms sleep per loop iteration (100 Hz polling) */
+#define DEBOUNCE_MS           200    /* 200 ms debounce filter for button press */
+
+/* ---- Helper: monotonic time in milliseconds ---- */
+static uint64_t get_time_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
 }
 
-int main(int argc, char *argv[]) {
-  int fd0, ret;
-  struct gpiochip_info cinfo;
-  struct gpiohandle_request req_red;
-  struct gpioevent_request req_pb;
-  struct gpioevent_data event;
+/* ---- Helper: set line output value ---- */
+static int set_line_value(int line_fd, int val)
+{
+    struct gpiohandle_data data;
+    memset(&data, 0, sizeof(data));
+    data.values[0] = val ? 1 : 0;
+    return ioctl(line_fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &data);
+}
 
-  printf("=== SC3103 Exercise A2: Push Button -> Toggle Red LED (ON/OFF) ===\n");
-
-  /* ---- Step 1: Open GPIO chip ---- */
-  fd0 = open(GPIO_CHIP_DEV, O_RDWR);
-  if (fd0 < 0) {
-    perror("Failed to open " GPIO_CHIP_DEV " (run with sudo)");
-    return EXIT_FAILURE;
-  }
-
-  /* ---- Step 2: Query chip info ---- */
-  memset(&cinfo, 0, sizeof(cinfo));
-  if (ioctl(fd0, GPIO_GET_CHIPINFO_IOCTL, &cinfo) < 0) {
-    perror("GPIO_GET_CHIPINFO_IOCTL failed");
-    close(fd0);
-    return EXIT_FAILURE;
-  }
-  printf("GPIO chip: %s, \"%s\", %u lines\n\n", cinfo.name, cinfo.label,
-         cinfo.lines);
-
-  /* ---- Step 3: Claim Red LED (GPIO27) as output (initially OFF) ---- */
-  memset(&req_red, 0, sizeof(req_red));
-  req_red.lines = 1;
-  req_red.lineoffsets[0] = PIN_LED_RED;
-  req_red.flags = GPIOHANDLE_REQUEST_OUTPUT;
-  req_red.default_values[0] = 0; /* start OFF */
-  strncpy(req_red.consumer_label, "ExA2_Red_LED",
-          sizeof(req_red.consumer_label) - 1);
-
-  ret = ioctl(fd0, GPIO_GET_LINEHANDLE_IOCTL, &req_red);
-  if (ret < 0) {
-    perror("Failed to get Red LED line handle");
-    close(fd0);
-    return EXIT_FAILURE;
-  }
-  set_red_led(req_red.fd, 0); /* Ensure Red LED starts OFF */
-
-  /* ---- Step 4: Register Push Button (GPIO11) rising-edge event ----
-   * W10L4 Slide 19: GPIOEVENT_REQUEST_RISING_EDGE
-   * Button is Active-High -> press generates LOW->HIGH (rising) edge. */
-  memset(&req_pb, 0, sizeof(req_pb));
-  req_pb.lineoffset = PIN_PUSH_BUTTON;
-  req_pb.handleflags = GPIOHANDLE_REQUEST_INPUT;
-  req_pb.eventflags = GPIOEVENT_REQUEST_RISING_EDGE;
-  strncpy(req_pb.consumer_label, "ExA2_PushButton",
-          sizeof(req_pb.consumer_label) - 1);
-
-  ret = ioctl(fd0, GPIO_GET_LINEEVENT_IOCTL, &req_pb);
-  if (ret < 0) {
-    perror("Failed to register Push Button event");
-    close(req_red.fd);
-    close(fd0);
-    return EXIT_FAILURE;
-  }
-
-  printf(
-      "Red LED is currently OFF.\n"
-      "Waiting for %d button press(es) on GPIO%d (Pibrella red button)...\n"
-      "  - Press 1: LED switches from OFF to ON and remains ON\n"
-      "  - Press 2: LED switches from ON to OFF and remains OFF\n\n",
-      NUM_PRESSES, PIN_PUSH_BUTTON);
-
-  /* ---- Step 5: Event loop - blocking read, no polling ----
-   * Software debounce via timestamp: physical contacts bounce for ~10-30 ms,
-   * generating multiple rapid rising-edge events queued in the kernel buffer.
-   * We accept a press only if at least DEBOUNCE_NS (300 ms) has elapsed
-   * since the last accepted press. event.timestamp is in nanoseconds. */
-  uint64_t last_accepted_ts = 0;
-  int red_state = 0; /* tracks current LED state: 0 = OFF, 1 = ON */
-  int press = 1;
-  while (press <= NUM_PRESSES) {
-    ssize_t n = read(req_pb.fd, &event, sizeof(event));
-    if (n == (ssize_t)sizeof(event)) {
-      /* Discard bounce: event arrived too soon after last valid press */
-      if (last_accepted_ts != 0 &&
-          (event.timestamp - last_accepted_ts) < DEBOUNCE_NS) {
-        printf("  [Bounce filtered: delta %" PRIu64 " ms < 300 ms, ignored]\n",
-               (event.timestamp - last_accepted_ts) / 1000000ULL);
-        continue; /* go back to read(), wait for next event */
-      }
-      last_accepted_ts = event.timestamp;
-
-      /* Toggle LED state: OFF -> ON (remains ON) or ON -> OFF (remains OFF) */
-      red_state = !red_state;
-      set_red_led(req_red.fd, red_state);
-
-      printf("[Press %d/%d] Button detected! Timestamp: %" PRIu64 " ns\n",
-             press, NUM_PRESSES, event.timestamp);
-      printf("  -> Red LED (GPIO%d) switched to %s and remains %s\n\n",
-             PIN_LED_RED, red_state ? "ON" : "OFF", red_state ? "ON" : "OFF");
-      ++press;
-    } else if (n < 0) {
-      if (errno == EINTR)
-        continue; /* signal interrupt, retry */
-      perror("Error reading button event");
-      break;
+/* ---- Helper: read line input value via polling ---- */
+static int get_line_value(int line_fd)
+{
+    struct gpiohandle_data data;
+    memset(&data, 0, sizeof(data));
+    if (ioctl(line_fd, GPIOHANDLE_GET_LINE_VALUES_IOCTL, &data) < 0) {
+        return -1;
     }
-  }
+    return data.values[0];
+}
 
-  /* ---- Step 6: Cleanup ---- */
-  close(req_pb.fd);
-  /* Turn OFF LED before exiting */
-  set_red_led(req_red.fd, 0);
-  close(req_red.fd);
-  close(fd0);
+int main(int argc, char *argv[])
+{
+    int fd0, ret;
+    struct gpiochip_info cinfo;
+    struct gpiohandle_request req_green;
+    struct gpiohandle_request req_red;
+    struct gpiohandle_request req_btn;
 
-  printf("Exercise A2 complete. Red LED turned OFF and cleaned up.\n");
-  return EXIT_SUCCESS;
+    printf("===============================================================\n");
+    printf("  SC3103 Exercise A: Simultaneous A1 & A2 (Concurrent Execution)\n");
+    printf("===============================================================\n");
+    printf("  - Task A1: Green LED (GPIO%d) blinks for 5.0 seconds (~0.5s per blink)\n", PIN_LED_GREEN);
+    printf("  - Task A2: Push Button (GPIO%d) polled at 100 Hz -> toggles Red LED (GPIO%d)\n\n",
+           PIN_PUSH_BUTTON, PIN_LED_RED);
+
+    /* Step 1: Open GPIO character device */
+    fd0 = open(GPIO_CHIP_DEV, O_RDWR);
+    if (fd0 < 0) {
+        perror("Failed to open " GPIO_CHIP_DEV " (run with sudo)");
+        return EXIT_FAILURE;
+    }
+
+    /* Step 2: Query chip information */
+    memset(&cinfo, 0, sizeof(cinfo));
+    ret = ioctl(fd0, GPIO_GET_CHIPINFO_IOCTL, &cinfo);
+    if (ret < 0) {
+        perror("GPIO_GET_CHIPINFO_IOCTL failed");
+        close(fd0);
+        return EXIT_FAILURE;
+    }
+    printf("GPIO chip: %s, \"%s\", %u lines\n\n", cinfo.name, cinfo.label, cinfo.lines);
+
+    /* Step 3: Claim Green LED (GPIO4) as output (starts ON) */
+    memset(&req_green, 0, sizeof(req_green));
+    req_green.lines = 1;
+    req_green.lineoffsets[0] = PIN_LED_GREEN;
+    req_green.flags = GPIOHANDLE_REQUEST_OUTPUT;
+    req_green.default_values[0] = 1;
+    strncpy(req_green.consumer_label, "Green_LED_A1", sizeof(req_green.consumer_label) - 1);
+    ret = ioctl(fd0, GPIO_GET_LINEHANDLE_IOCTL, &req_green);
+    if (ret < 0) {
+        perror("Failed to request Green LED handle");
+        close(fd0);
+        return EXIT_FAILURE;
+    }
+
+    /* Step 4: Claim Red LED (GPIO27) as output (starts OFF) */
+    memset(&req_red, 0, sizeof(req_red));
+    req_red.lines = 1;
+    req_red.lineoffsets[0] = PIN_LED_RED;
+    req_red.flags = GPIOHANDLE_REQUEST_OUTPUT;
+    req_red.default_values[0] = 0;
+    strncpy(req_red.consumer_label, "Red_LED_A2", sizeof(req_red.consumer_label) - 1);
+    ret = ioctl(fd0, GPIO_GET_LINEHANDLE_IOCTL, &req_red);
+    if (ret < 0) {
+        perror("Failed to request Red LED handle");
+        close(req_green.fd);
+        close(fd0);
+        return EXIT_FAILURE;
+    }
+
+    /* Step 5: Claim Push Button (GPIO11) as input for POLLING */
+    memset(&req_btn, 0, sizeof(req_btn));
+    req_btn.lines = 1;
+    req_btn.lineoffsets[0] = PIN_PUSH_BUTTON;
+    req_btn.flags = GPIOHANDLE_REQUEST_INPUT;
+    strncpy(req_btn.consumer_label, "Button_Poll_A2", sizeof(req_btn.consumer_label) - 1);
+    ret = ioctl(fd0, GPIO_GET_LINEHANDLE_IOCTL, &req_btn);
+    if (ret < 0) {
+        perror("Failed to request Push Button handle");
+        close(req_red.fd);
+        close(req_green.fd);
+        close(fd0);
+        return EXIT_FAILURE;
+    }
+
+    int green_state = 1; // start with Green LED ON
+    set_line_value(req_green.fd, green_state);
+
+    int red_state = 0;   // start with Red LED OFF
+    set_line_value(req_red.fd, red_state);
+
+    uint64_t start_ms = get_time_ms();
+    uint64_t last_green_toggle_ms = start_ms;
+    uint64_t last_btn_press_ms = 0;
+    int prev_btn_val = 0;
+    int toggle_count = 0;
+
+    printf("[0.00s] Started! Green LED is ON (blinking). Red LED is OFF.\n");
+    printf("        Press the Pibrella button at any time during the 5 seconds!\n\n");
+
+    const uint64_t total_duration_ms = (uint64_t)(TOTAL_DURATION_SEC * 1000.0);
+
+    /* Step 6: Non-blocking concurrent execution loop */
+    while (1) {
+        uint64_t now_ms = get_time_ms();
+        uint64_t elapsed_ms = now_ms - start_ms;
+
+        if (elapsed_ms >= total_duration_ms) {
+            break; /* 5 seconds completed */
+        }
+
+        /* ---- Task A1: Toggle Green LED every 250 ms (0.5s per blink cycle) ---- */
+        if (now_ms - last_green_toggle_ms >= BLINK_HALF_PERIOD_MS) {
+            green_state = !green_state;
+            set_line_value(req_green.fd, green_state);
+            last_green_toggle_ms = now_ms;
+        }
+
+        /* ---- Task A2: Poll Push Button (GPIO11) and toggle Red LED (GPIO27) ---- */
+        int btn_val = get_line_value(req_btn.fd);
+        if (btn_val >= 0) {
+            /* Detect button press transition: 0 (released) -> 1 (pressed) */
+            if (btn_val == 1 && prev_btn_val == 0) {
+                /* Debounce check: ignore bounce within DEBOUNCE_MS */
+                if (now_ms - last_btn_press_ms >= DEBOUNCE_MS) {
+                    last_btn_press_ms = now_ms;
+                    red_state = !red_state;
+                    set_line_value(req_red.fd, red_state);
+                    toggle_count++;
+                    printf("[Time: %4.2fs] [POLLED] Button pressed! Red LED toggled: %s (remains %s)\n",
+                           (double)elapsed_ms / 1000.0,
+                           red_state ? "ON" : "OFF",
+                           red_state ? "ON" : "OFF");
+                }
+            }
+            prev_btn_val = btn_val;
+        }
+
+        /* Sleep 10 ms (100 Hz sampling tick - non-blocking time-slicing) */
+        usleep(POLL_INTERVAL_US);
+    }
+
+    printf("\n[5.00s] 5.0 seconds completed! Green LED finished blinking.\n");
+    printf("        Total button presses registered: %d\n", toggle_count);
+    printf("        Final Red LED state was: %s\n", red_state ? "ON" : "OFF");
+
+    /* Step 7: Cleanup */
+    set_line_value(req_green.fd, 0); // Turn off Green LED
+    set_line_value(req_red.fd, 0);   // Turn off Red LED
+    close(req_btn.fd);
+    close(req_red.fd);
+    close(req_green.fd);
+    close(fd0);
+
+    printf("        Both LEDs turned OFF. Handles closed. Exercise A done.\n");
+    return EXIT_SUCCESS;
 }
