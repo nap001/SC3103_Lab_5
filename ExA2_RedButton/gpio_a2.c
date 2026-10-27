@@ -38,6 +38,7 @@
 #define PIN_LED_RED      27
 #define PIN_PUSH_BUTTON  11
 #define NUM_PRESSES      5    /* number of button presses before exit */
+#define DEBOUNCE_NS      300000000ULL  /* 300 ms minimum gap between valid presses */
 #define BLINK_COUNT      3    /* Red LED blinks per press             */
 #define BLINK_DELAY_US   150000  /* 150 ms per half-blink             */
 
@@ -121,17 +122,33 @@ int main(int argc, char *argv[])
     printf("Waiting for %d button press(es) on GPIO%d (Pibrella red button)...\n\n",
            NUM_PRESSES, PIN_PUSH_BUTTON);
 
-    /* ---- Step 5: Event loop - blocking read, no polling ---- */
-    for (int press = 1; press <= NUM_PRESSES; ++press) {
+    /* ---- Step 5: Event loop - blocking read, no polling ----
+     * Software debounce via timestamp: physical contacts bounce for ~10-30 ms,
+     * generating multiple rapid rising-edge events queued in the kernel buffer.
+     * We accept a press only if at least DEBOUNCE_NS (300 ms) has elapsed
+     * since the last accepted press. event.timestamp is in nanoseconds. */
+    uint64_t last_accepted_ts = 0;
+    int press = 1;
+    while (press <= NUM_PRESSES) {
         ssize_t n = read(req_pb.fd, &event, sizeof(event));
         if (n == (ssize_t)sizeof(event)) {
+            /* Discard bounce: event arrived too soon after last valid press */
+            if (last_accepted_ts != 0 &&
+                (event.timestamp - last_accepted_ts) < DEBOUNCE_NS) {
+                printf("  [Bounce filtered: delta %" PRIu64 " ms < 300 ms, ignored]\n",
+                       (event.timestamp - last_accepted_ts) / 1000000ULL);
+                continue;  /* go back to read(), wait for next event */
+            }
+            last_accepted_ts = event.timestamp;
+
             printf("[Press %d/%d] Button detected! Timestamp: %" PRIu64 " ns\n",
                    press, NUM_PRESSES, event.timestamp);
             printf("  -> Blinking Red LED (GPIO%d) %d times...\n",
                    PIN_LED_RED, BLINK_COUNT);
             blink_red(req_red.fd, BLINK_COUNT, BLINK_DELAY_US);
+            ++press;
         } else if (n < 0) {
-            if (errno == EINTR) { --press; continue; }  /* signal, retry */
+            if (errno == EINTR) continue;  /* signal interrupt, retry */
             perror("Error reading button event");
             break;
         }

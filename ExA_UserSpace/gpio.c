@@ -178,16 +178,29 @@ int monitor_button_and_blink_red(int chip_fd)
 
     printf("Waiting for Push Button press (Press button on Pibrella, 5 presses to finish)...\n");
 
-    for (int press_count = 1; press_count <= 5; ++press_count) {
+    // Software debounce: accept a press only if >= 300ms since last valid press.
+    // Physical contacts bounce for ~10-30ms generating spurious extra events.
+    const uint64_t DEBOUNCE_NS = 300000000ULL;  // 300 ms in nanoseconds
+    uint64_t last_accepted_ts = 0;
+    int press_count = 1;
+    while (press_count <= 5) {
         // Blocking read on event file descriptor (W10L4 Slide 19)
         ssize_t bytes_read = read(req_pb.fd, &event, sizeof(event));
         if (bytes_read == sizeof(event)) {
+            // Discard bounce events that arrive too quickly after last press
+            if (last_accepted_ts != 0 &&
+                (event.timestamp - last_accepted_ts) < DEBOUNCE_NS) {
+                continue;  // bounced event, ignore and wait for next
+            }
+            last_accepted_ts = event.timestamp;
+
             printf("[Event %d] Button pressed! Timestamp: %" PRIu64 " ns\n",
                    press_count, event.timestamp);
             printf(" -> Blinking Red LED (GPIO27) 3 times...\n");
 
             // Blink Red LED 3 times (150ms ON, 150ms OFF)
             blink_red_led(req_red.fd, 3, 150000);
+            ++press_count;
         } else if (bytes_read < 0) {
             if (errno == EINTR) continue; // interrupted by signal
             perror("Error reading button event");
