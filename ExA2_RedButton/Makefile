@@ -1,4 +1,4 @@
-# Makefile - Exercise A2: Push Button -> Red LED Blink
+# Makefile - Exercise A2: Push Button -> Toggle Red LED (ON/OFF)
 # Compile on Raspberry Pi:   make
 # Run:                        sudo ./gpio_a2
 

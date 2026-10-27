@@ -108,45 +108,43 @@ int blink_green_yellow(int chip_fd)
 /**
  * blink_red_led() - Helper to blink the Red LED for a specified duration
  */
-void blink_red_led(int red_fd, int count, useconds_t delay_us)
+/**
+ * set_red_led() - Helper to set the Red LED state
+ * @red_fd: File descriptor to the GPIO line handle
+ * @state:  1 for ON, 0 for OFF
+ */
+void set_red_led(int red_fd, int state)
 {
     struct gpiohandle_data red_data;
     memset(&red_data, 0, sizeof(red_data));
-
-    for (int i = 0; i < count; ++i) {
-        // Red LED ON
-        red_data.values[0] = 1;
-        ioctl(red_fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &red_data);
-        usleep(delay_us);
-
-        // Red LED OFF
-        red_data.values[0] = 0;
-        ioctl(red_fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &red_data);
-        usleep(delay_us);
-    }
+    red_data.values[0] = state ? 1 : 0;
+    ioctl(red_fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &red_data);
 }
 
 /**
- * monitor_button_and_blink_red() - Exercise 3.2
+ * monitor_button_and_toggle_red() - Exercise 3.2
  *
  * Monitors the Push Button on GPIO11 using Linux GPIO line event handling
  * (GPIO_GET_LINEEVENT_IOCTL) aligned with Lecture W10L4 Slide 19.
- * When the button press event occurs, it triggers the Red LED (GPIO27) to blink.
+ * When the button press event occurs, it toggles the Red LED (GPIO27):
+ *   - OFF -> ON (and remains ON)
+ *   - ON -> OFF (and remains OFF)
  */
-int monitor_button_and_blink_red(int chip_fd)
+int monitor_button_and_toggle_red(int chip_fd)
 {
     struct gpiohandle_request req_red;
     struct gpioevent_request req_pb;
     struct gpioevent_data event;
     int ret;
 
-    printf("\n=== [Exercise 3.2] Push Button Monitor & Red LED Blink ===\n");
+    printf("\n=== [Exercise 3.2] Push Button Monitor & Toggle Red LED ===\n");
 
-    // 1. Setup Red LED (GPIO27) as output handle
+    // 1. Setup Red LED (GPIO27) as output handle (initially OFF)
     memset(&req_red, 0, sizeof(req_red));
     req_red.lines = 1;
     req_red.lineoffsets[0] = PIN_LED_RED;
     req_red.flags = GPIOHANDLE_REQUEST_OUTPUT;
+    req_red.default_values[0] = 0;
     strncpy(req_red.consumer_label, "Pibrella_Red_LED", sizeof(req_red.consumer_label) - 1);
 
     ret = ioctl(chip_fd, GPIO_GET_LINEHANDLE_IOCTL, &req_red);
@@ -154,15 +152,9 @@ int monitor_button_and_blink_red(int chip_fd)
         perror("Failed to request Red LED line handle");
         return -1;
     }
+    set_red_led(req_red.fd, 0); // ensure starts OFF
 
     // 2. Setup Push Button (GPIO11) event request
-    // On Pibrella, the push button is wired as Active-High:
-    // 3V3 -> 1K Resistor -> Push Button -> GPIO11.
-    // - Unpressed: Switch is open -> GPIO11 is pulled LOW (0) via internal pulldown.
-    // - Pressed: Switch closes -> connects 3V3 to GPIO11 (reads HIGH / 1).
-    // Hence, pressing the button produces a LOW-to-HIGH transition (RISING EDGE),
-    // precisely as configured in W10L4 Slide 19 (GPIOEVENT_REQUEST_RISING_EDGE)
-    // and Slide 82 ("on rising edge (press, not release)").
     memset(&req_pb, 0, sizeof(req_pb));
     req_pb.lineoffset = PIN_PUSH_BUTTON;
     req_pb.handleflags = GPIOHANDLE_REQUEST_INPUT;
@@ -176,12 +168,14 @@ int monitor_button_and_blink_red(int chip_fd)
         return -1;
     }
 
+    printf("Red LED is currently OFF.\n");
     printf("Waiting for Push Button press (Press button on Pibrella, 5 presses to finish)...\n");
 
     // Software debounce: accept a press only if >= 300ms since last valid press.
     // Physical contacts bounce for ~10-30ms generating spurious extra events.
     const uint64_t DEBOUNCE_NS = 300000000ULL;  // 300 ms in nanoseconds
     uint64_t last_accepted_ts = 0;
+    int red_state = 0;
     int press_count = 1;
     while (press_count <= 5) {
         // Blocking read on event file descriptor (W10L4 Slide 19)
@@ -194,12 +188,15 @@ int monitor_button_and_blink_red(int chip_fd)
             }
             last_accepted_ts = event.timestamp;
 
-            printf("[Event %d] Button pressed! Timestamp: %" PRIu64 " ns\n",
-                   press_count, event.timestamp);
-            printf(" -> Blinking Red LED (GPIO27) 3 times...\n");
+            // Toggle Red LED state: OFF -> ON, ON -> OFF
+            red_state = !red_state;
+            set_red_led(req_red.fd, red_state);
 
-            // Blink Red LED 3 times (150ms ON, 150ms OFF)
-            blink_red_led(req_red.fd, 3, 150000);
+            printf("[Event %d/5] Button pressed! Timestamp: %" PRIu64 " ns\n",
+                   press_count, event.timestamp);
+            printf(" -> Red LED (GPIO%d) switched to %s and remains %s\n\n",
+                   PIN_LED_RED, red_state ? "ON" : "OFF", red_state ? "ON" : "OFF");
+
             ++press_count;
         } else if (bytes_read < 0) {
             if (errno == EINTR) continue; // interrupted by signal
@@ -210,8 +207,9 @@ int monitor_button_and_blink_red(int chip_fd)
 
     // Cleanup handles
     close(req_pb.fd);
+    set_red_led(req_red.fd, 0); // turn off on exit
     close(req_red.fd);
-    printf("Push Button monitoring completed.\n");
+    printf("Push Button monitoring completed. Red LED turned OFF.\n");
     return 0;
 }
 
@@ -248,8 +246,8 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Exercise 3.1 encountered an error.\n");
     }
 
-    // Step 4: Run Exercise 3.2 - Monitor Button and Blink Red LED
-    if (monitor_button_and_blink_red(fd0) != 0) {
+    // Step 4: Run Exercise 3.2 - Monitor Button and Toggle Red LED
+    if (monitor_button_and_toggle_red(fd0) != 0) {
         fprintf(stderr, "Exercise 3.2 encountered an error.\n");
     }
 
